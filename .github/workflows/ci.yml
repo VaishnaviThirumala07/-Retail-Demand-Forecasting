@@ -23,6 +23,19 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
+      # ─── Validate Kaggle credentials ───────────────────────────────────────
+      - name: Verify Kaggle credentials
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+        run: |
+          if [ -z "$KAGGLE_USERNAME" ] || [ -z "$KAGGLE_KEY" ]; then
+            echo "ERROR: Kaggle credentials not configured in GitHub Secrets"
+            echo "Set KAGGLE_USERNAME and KAGGLE_KEY in repository secrets"
+            exit 1
+          fi
+          echo "✓ Kaggle credentials found"
+
       # ─── Install dependencies ─────────────────────────────────────────────
       - name: Install Python dependencies
         run: |
@@ -34,7 +47,7 @@ jobs:
         run: dbt deps --project-dir dbt_m5
 
       # ─── Download M5 data from Kaggle ─────────────────────────────────────
-      - name: Download sell_prices.csv from Kaggle
+      - name: Download M5 dataset from Kaggle
         env:
           KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
           KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
@@ -42,6 +55,8 @@ jobs:
           mkdir -p data/raw
           kaggle competitions download \
             -c m5-forecasting-accuracy \
+            -f sales_train_evaluation.csv \
+            -f calendar.csv \
             -f sell_prices.csv \
             -p data/raw
 

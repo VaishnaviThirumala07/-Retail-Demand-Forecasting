@@ -78,113 +78,85 @@ def build_features(con: duckdb.DuckDBPyConnection, scope_state: str | None) -> N
     n = con.execute("SELECT COUNT(*) FROM feat_base").fetchone()[0]
     console.print(f"  Base rows: {n:,}")
 
-    # Step 2: lag features (≥ 28 days) — computed in DuckDB window functions
-    console.print("  Computing lag features (28, 35, 42, 56 days)…")
+    # Steps 2-4: compute all features in a single pass (avoids OOM from 3-way join)
+    console.print("  Computing lags, rolling stats, price features & joining (single pass)…")
     con.execute("DROP TABLE IF EXISTS feat_lags")
-    con.execute(
-        """
-        CREATE TABLE feat_lags AS
-        SELECT
-            series_key,
-            sale_date,
-            units,
-            -- Lag features — minimum lag = 28 (horizon length)
-            LAG(units, 28)  OVER w AS lag_28,
-            LAG(units, 35)  OVER w AS lag_35,
-            LAG(units, 42)  OVER w AS lag_42,
-            LAG(units, 56)  OVER w AS lag_56,
-            -- Rolling statistics (computed on lag_28 window to avoid lookahead)
-            AVG(units) OVER (PARTITION BY series_key
-                             ORDER BY sale_date
-                             ROWS BETWEEN 56 PRECEDING AND 29 PRECEDING) AS roll_mean_28,
-            AVG(units) OVER (PARTITION BY series_key
-                             ORDER BY sale_date
-                             ROWS BETWEEN 35 PRECEDING AND 29 PRECEDING) AS roll_mean_7,
-            AVG(units) OVER (PARTITION BY series_key
-                             ORDER BY sale_date
-                             ROWS BETWEEN 42 PRECEDING AND 29 PRECEDING) AS roll_mean_14,
-            STDDEV(units) OVER (PARTITION BY series_key
-                                ORDER BY sale_date
-                                ROWS BETWEEN 56 PRECEDING AND 29 PRECEDING) AS roll_std_28,
-            MAX(units) OVER (PARTITION BY series_key
-                             ORDER BY sale_date
-                             ROWS BETWEEN 56 PRECEDING AND 29 PRECEDING) AS roll_max_28
-        FROM feat_base
-        WINDOW w AS (PARTITION BY series_key ORDER BY sale_date)
-        """
-    )
-
-    # Step 3: price features
-    console.print("  Computing price features…")
     con.execute("DROP TABLE IF EXISTS feat_price")
-    con.execute(
-        """
-        CREATE TABLE feat_price AS
-        SELECT
-            series_key,
-            sale_date,
-            sell_price,
-            LAG(sell_price, 7)  OVER w AS price_lag_7,
-            AVG(sell_price)     OVER (PARTITION BY series_key) AS price_mean,
-            sell_price - LAG(sell_price, 7) OVER w             AS price_change_7,
-            -- Weeks since last price change
-            SUM(CASE WHEN sell_price != LAG(sell_price, 7) OVER w THEN 1 ELSE 0 END)
-                OVER (PARTITION BY series_key ORDER BY sale_date) AS price_change_count
-        FROM feat_base
-        WINDOW w AS (PARTITION BY series_key ORDER BY sale_date)
-        """
-    )
-
-    # Step 4: join everything
-    console.print("  Joining all features…")
     con.execute("DROP TABLE IF EXISTS features")
     con.execute(
         """
         CREATE TABLE features AS
-        SELECT
-            b.series_key,
-            b.item_id,
-            b.dept_id,
-            b.cat_id,
-            b.store_id,
-            b.state_id,
-            b.sale_date,
-            b.units,
-            -- Calendar
-            b.weekday,
-            b.wday,
-            b.month,
-            b.year,
-            b.week_of_year,
-            b.snap_flag,
-            b.has_event,
-            b.event_type,
-            -- Lags
-            l.lag_28,
-            l.lag_35,
-            l.lag_42,
-            l.lag_56,
-            -- Rolling
-            l.roll_mean_28,
-            l.roll_mean_7,
-            l.roll_mean_14,
-            l.roll_std_28,
-            l.roll_max_28,
-            -- Price
-            p.sell_price,
-            p.price_lag_7,
-            p.price_mean,
-            p.price_change_7,
-            p.price_change_count,
-            -- Relative price
-            CASE WHEN p.price_mean > 0
-                 THEN p.sell_price / p.price_mean
-                 ELSE 1.0 END AS price_rel_mean
-        FROM feat_base b
-        LEFT JOIN feat_lags  l USING (series_key, sale_date)
-        LEFT JOIN feat_price p USING (series_key, sale_date)
-        -- Drop rows where lags are still null (first 56 days)
-        WHERE l.lag_56 IS NOT NULL
+        WITH price_lagged AS (
+            -- Step A: compute price LAG first (cannot nest window functions)
+            SELECT
+                series_key,
+                sale_date,
+                sell_price,
+                LAG(sell_price, 7) OVER (PARTITION BY series_key ORDER BY sale_date) AS price_lag_7,
+                AVG(sell_price)    OVER (PARTITION BY series_key)                     AS price_mean
+            FROM feat_base
+        ),
+        price_features AS (
+            -- Step B: use price_lag_7 in a non-nested window
+            SELECT
+                series_key,
+                sale_date,
+                sell_price,
+                price_lag_7,
+                price_mean,
+                sell_price - price_lag_7 AS price_change_7,
+                SUM(CASE WHEN sell_price IS DISTINCT FROM price_lag_7 THEN 1 ELSE 0 END)
+                    OVER (PARTITION BY series_key ORDER BY sale_date) AS price_change_count
+            FROM price_lagged
+        ),
+        all_features AS (
+            -- Step C: all lag + rolling + calendar features from feat_base
+            SELECT
+                b.series_key,
+                b.item_id,
+                b.dept_id,
+                b.cat_id,
+                b.store_id,
+                b.state_id,
+                b.sale_date,
+                b.units,
+                b.weekday,
+                b.wday,
+                b.month,
+                b.year,
+                b.week_of_year,
+                b.snap_flag,
+                b.has_event,
+                b.event_type,
+                -- Lag features (min lag = 28 → no leakage)
+                LAG(b.units, 28) OVER w AS lag_28,
+                LAG(b.units, 35) OVER w AS lag_35,
+                LAG(b.units, 42) OVER w AS lag_42,
+                LAG(b.units, 56) OVER w AS lag_56,
+                -- Rolling stats (window ends at t-29 → no lookahead)
+                AVG(b.units) OVER (PARTITION BY b.series_key ORDER BY b.sale_date
+                                   ROWS BETWEEN 56 PRECEDING AND 29 PRECEDING) AS roll_mean_28,
+                AVG(b.units) OVER (PARTITION BY b.series_key ORDER BY b.sale_date
+                                   ROWS BETWEEN 35 PRECEDING AND 29 PRECEDING) AS roll_mean_7,
+                AVG(b.units) OVER (PARTITION BY b.series_key ORDER BY b.sale_date
+                                   ROWS BETWEEN 42 PRECEDING AND 29 PRECEDING) AS roll_mean_14,
+                STDDEV(b.units) OVER (PARTITION BY b.series_key ORDER BY b.sale_date
+                                      ROWS BETWEEN 56 PRECEDING AND 29 PRECEDING) AS roll_std_28,
+                MAX(b.units) OVER (PARTITION BY b.series_key ORDER BY b.sale_date
+                                   ROWS BETWEEN 56 PRECEDING AND 29 PRECEDING) AS roll_max_28,
+                -- Price (from CTE)
+                p.sell_price,
+                p.price_lag_7,
+                p.price_mean,
+                p.price_change_7,
+                p.price_change_count,
+                CASE WHEN p.price_mean > 0 THEN p.sell_price / p.price_mean ELSE 1.0 END AS price_rel_mean
+            FROM feat_base b
+            LEFT JOIN price_features p USING (series_key, sale_date)
+            WINDOW w AS (PARTITION BY b.series_key ORDER BY b.sale_date)
+        )
+        SELECT * FROM all_features
+        WHERE lag_56 IS NOT NULL
         """
     )
 
@@ -229,7 +201,14 @@ def main(
     warehouse: Path = typer.Option(WAREHOUSE, help="DuckDB warehouse path"),
 ) -> None:
     scope = None if state.lower() == "all" else state.upper()
-    con = duckdb.connect(str(warehouse))
+
+    # Allow DuckDB to spill to disk — prevents OOM on 16GB machines
+    tmp_dir = ROOT / "data" / "duckdb_tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect(str(warehouse), config={
+        "memory_limit": "8GB",
+        "temp_directory": str(tmp_dir),
+    })
     build_features(con, scope)
     verify_no_leakage(con)
     con.close()
