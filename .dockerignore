@@ -1,0 +1,9 @@
+# Exclude build artefacts, raw data, and local caches
+**/.git
+**/.idea
+**/__pycache__
+**/*.pyc
+warehouse/*.duckdb
+data/raw/*
+reports/*
+models/*

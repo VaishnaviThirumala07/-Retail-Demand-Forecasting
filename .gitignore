@@ -1,0 +1,40 @@
+# Data — never commit raw M5 data or DuckDB warehouse
+data/raw/
+data/features/
+data/forecasts/
+warehouse/
+
+# Models
+models/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.env
+dist/
+build/
+
+# dbt
+dbt_m5/target/
+dbt_m5/dbt_packages/
+dbt_m5/logs/
+
+# MLflow
+mlruns/
+mlflow.db
+
+# Streamlit
+.streamlit/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Reports (keep structure, not figures)
+reports/figures/
