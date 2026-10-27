@@ -14,7 +14,13 @@ import typer
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-console = Console()
+# Force UTF-8 output on Windows (prevents cp1252 UnicodeEncodeError)
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
+console = Console(force_terminal=True, highlight=False)
 
 # Paths
 ROOT = Path(__file__).resolve().parent.parent
@@ -75,7 +81,8 @@ def melt_sales(con: duckdb.DuckDBPyConnection) -> None:
         SELECT column_name FROM information_schema.columns
         WHERE table_name = 'raw_sales_wide'
           AND column_name LIKE 'd_%'
-        ORDER BY CAST(REGEXP_EXTRACT(column_name, '\\d+') AS INTEGER)
+          AND REGEXP_EXTRACT(column_name, '\d+') != ''
+        ORDER BY TRY_CAST(REGEXP_EXTRACT(column_name, '\d+') AS INTEGER)
         """
     ).fetchall()
     day_cols = [c[0] for c in cols]

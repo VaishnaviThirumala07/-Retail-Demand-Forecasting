@@ -3,5 +3,5 @@ dbt_m5:
   outputs:
     dev:
       type: duckdb
-      path: "../warehouse/m5.duckdb"
+      path: "D:/DS_Project2/warehouse/m5.duckdb"
       threads: 4
