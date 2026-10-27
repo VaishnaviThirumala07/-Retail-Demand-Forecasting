@@ -1,0 +1,87 @@
+version: 2
+
+sources:
+  - name: raw
+    database: "m5"
+    schema: main
+    tables:
+      - name: raw_sales_enriched
+      - name: raw_calendar
+      - name: raw_prices
+      - name: raw_sales_long
+
+models:
+  - name: stg_sales
+    description: "Long-format sales with calendar and price joined"
+    columns:
+      - name: item_id
+        tests: [not_null]
+      - name: store_id
+        tests: [not_null]
+      - name: sale_date
+        tests: [not_null]
+      - name: units_sold
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              min_value: 0
+      - name: sell_price
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              inclusive: false
+              config:
+                where: "sell_price IS NOT NULL"
+
+  - name: stg_calendar
+    description: "Cleaned M5 calendar with events and SNAP flags"
+    columns:
+      - name: day_id
+        tests: [not_null, unique]
+      - name: calendar_date
+        tests: [not_null]
+
+  - name: stg_prices
+    description: "Weekly sell prices per item × store"
+    columns:
+      - name: store_id
+        tests: [not_null]
+      - name: item_id
+        tests: [not_null]
+      - name: sell_price
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              inclusive: false
+
+  - name: fct_daily_sales
+    description: "Fact table: daily sales grain = item × store × date"
+    columns:
+      - name: surrogate_key
+        tests: [not_null, unique]
+      - name: units_sold
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+      - name: item_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_item')
+              field: item_id
+      - name: store_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_store')
+              field: store_id
+
+  - name: dim_item
+    columns:
+      - name: item_id
+        tests: [not_null, unique]
+
+  - name: dim_store
+    columns:
+      - name: store_id
+        tests: [not_null, unique]

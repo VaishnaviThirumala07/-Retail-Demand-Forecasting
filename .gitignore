@@ -4,8 +4,10 @@ data/features/
 data/forecasts/
 warehouse/
 
-# Models
-models/
+# ML model artifacts (trained models, not dbt model SQL files)
+models/*.pkl
+models/*.joblib
+models/*.lgb
 
 # Python
 __pycache__/
