@@ -1,29 +1,31 @@
 # Key SQL Insights — DS31 Retail Demand Forecasting
 
-*(Fill these in after running `make all` with your real numbers.)*
+Computed over the full DuckDB warehouse (all 3 states, 2011-01-29 → 2016-05-22, 59M item-store-days) by
+`python sql/analysis/insights_summary.py`.
 
 ## 1. SNAP Day Sales Lift
 SNAP (Supplemental Nutrition Assistance Program) days drive a measurable uplift in grocery sales.
-**Finding:** Food category sales in CA are **X% higher** on SNAP days vs non-SNAP days.
-This is a critical signal for demand planners adjusting replenishment schedules at the start of each month.
+**Finding:** CA FOODS sells **10.2% more** units on SNAP days: 10,733 units/day vs 9,736 on non-SNAP days.
+Replenishment for food items should be front-loaded around the SNAP days at the start of each month.
 
 ## 2. Weekend Seasonality
-Sales peak on **Fridays and Saturdays** across all states.
-**Finding:** Friday sales index is **~X** (average = 100), Saturday is **~X**.
-Sunday drops to ~X, suggesting weekend shopping patterns dominate over mid-week.
-Impact: replenishment should target Thursday/Friday arrivals.
+Sales peak at the **weekend**, not on Friday.
+**Finding:** Day-of-week sales index (average day = 100): Saturday **121**, Sunday **120**, Friday 100,
+Monday 96, Tuesday 89, Thursday 88, Wednesday **87**.
+Impact: stock should arrive by Friday to cover the Saturday/Sunday peak, which runs ~38% above the midweek low.
 
-## 3. Pareto Concentration
-**Finding:** The top **20% of items** generate approximately **80% of revenue** — a classic Pareto distribution.
-This means forecasting accuracy for the top quintile drives the vast majority of inventory value impact.
-The LightGBM model with dollar-weighted WRMSSE naturally focuses accuracy on these high-value items.
+## 3. Revenue Concentration
+**Finding:** The top **20% of items** generate **59% of revenue**. That's concentrated, but well short of a strict 80/20 Pareto split.
+Accuracy on the top quintile still drives most of the inventory value at stake, which is the case for dollar-weighted
+error metrics (WRMSSE).
 
 ## 4. Intermittent Demand
-**Finding:** **X%** of item-store combinations have more than 50% zero-sales days.
-These intermittent series are difficult to forecast with standard methods and justify the Tweedie objective,
-which natively handles zero-inflated count distributions.
+**Finding:** **78%** of the 30,490 item-store series have more than 50% zero-sales days.
+(This includes days before an item launched, which M5 records as zeros.)
+Such zero-heavy series justify the Tweedie objective, which models zero-inflated counts natively.
 
 ## 5. Holiday Effects
-**Finding:** Christmas week drives a **~X% uplift** in total sales vs the same week in non-holiday years.
-Super Bowl Sunday (FOODS_3 / HOBBIES_1 categories) shows a **~X%** spike.
+**Finding:** Stores are effectively **closed on Christmas Day** (0% of average daily sales), so that date needs special
+handling in any model or replenishment plan. **Super Bowl Sunday** lifts FOODS_3 sales by **~6.9%** compared with
+non-event Sundays within ±4 weeks.
 These signals are captured via the `has_event` and `event_type` features in LightGBM.
