@@ -3,7 +3,7 @@
 > **Forecast 28-day demand across a retail hierarchy using LightGBM + MinTrace reconciliation.**  
 > Built on 59M+ Walmart sales records from the M5 competition. Produces hierarchically coherent forecasts from state → store → category → department → SKU level.
 
-[![CI](https://github.com/VaishnaviThirumala07/-Retail-Demand-Forecasting/actions/workflows/ci.yml/badge.svg)](https://github.com/VaishnaviThirumala07/-Retail-Demand-Forecasting/actions/workflows/ci.yml)
+[![CI](https://github.com/VaishnaviThirumala07/Retail-Demand-Forecasting/actions/workflows/ci.yml/badge.svg)](https://github.com/VaishnaviThirumala07/Retail-Demand-Forecasting/actions/workflows/ci.yml)
 
 [![Python](https://img.shields.io/badge/python-3.11-blue)](https://python.org)
 [![LightGBM](https://img.shields.io/badge/LightGBM-4.3-green)](https://lightgbm.readthedocs.io)
