@@ -162,6 +162,20 @@ def evaluate_level(
     }
 
 
+def bottom_level(recon: pd.DataFrame) -> pd.DataFrame:
+    """
+    Keep only item x store rows of the reconciled forecasts, re-keyed from
+    "CA/CA_1/FOODS/FOODS_1/FOODS_1_001" to "FOODS_1_001_CA_1". Upper levels
+    are sums of these (reconciled forecasts are coherent).
+    """
+    parts = recon["unique_id"].str.split("/")
+    recon = recon[parts.str.len() == 5].copy()
+    parts = parts[recon.index]
+    recon["unique_id"] = parts.str[4] + "_" + parts.str[1]
+    recon["ds"] = pd.to_datetime(recon["ds"])
+    return recon
+
+
 # ---------------------------------------------------------------------------
 # Main evaluation pipeline
 # ---------------------------------------------------------------------------
@@ -229,7 +243,7 @@ def main(
     }
 
     if recon_path.exists():
-        recon = pd.read_parquet(recon_path)
+        recon = bottom_level(pd.read_parquet(recon_path))
         recon_methods = [c for c in recon.columns if c not in ("unique_id", "ds", "y")]
 
         for method in recon_methods:

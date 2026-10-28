@@ -14,6 +14,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from metrics import bottom_level
+
 console = Console()
 ROOT = Path(__file__).resolve().parent.parent
 FORECASTS_DIR = ROOT / "data" / "forecasts"
@@ -76,7 +78,7 @@ def load_actuals_and_forecasts() -> tuple[pd.DataFrame | None, pd.DataFrame | No
     recon_path = FORECASTS_DIR / "reconciled_forecasts.parquet"
     lgbm_path = FORECASTS_DIR / "lgbm_forecasts.parquet"
 
-    recon = pd.read_parquet(recon_path) if recon_path.exists() else None
+    recon = bottom_level(pd.read_parquet(recon_path)) if recon_path.exists() else None
     lgbm = pd.read_parquet(lgbm_path) if lgbm_path.exists() else None
     return recon, lgbm
 
@@ -147,7 +149,7 @@ def main(
 
     # 2. LightGBM
     if lgbm is not None:
-        lgbm_agg = lgbm.groupby("ds")["forecast"].sum()
+        lgbm_agg = lgbm.groupby("sale_date")["forecast"].sum()
         lgbm_agg.index = pd.to_datetime(lgbm_agg.index)
         # align
         common_dates = actuals_series.index.intersection(lgbm_agg.index)

@@ -15,10 +15,11 @@ import numpy as np
 import pandas as pd
 import typer
 from hierarchicalforecast.core import HierarchicalReconciliation
-from hierarchicalforecast.methods import BottomUp, MinTrace, TopDown
+from hierarchicalforecast.methods import BottomUpSparse, MinTraceSparse, TopDownSparse
 from hierarchicalforecast.utils import aggregate
 from rich.console import Console
 from rich.table import Table
+from scipy.sparse import save_npz
 
 console = Console()
 ROOT = Path(__file__).resolve().parent.parent
@@ -80,13 +81,22 @@ def build_summing_matrix(df: pd.DataFrame) -> tuple:
     The spec defines the column paths at each level.
     """
     hierarchy_spec = build_hierarchy_spec()
-    # aggregate expects the bottom-level columns to be in the df
-    # We pass column lists representing each hierarchy level
+    # aggregate builds its own unique_id ("CA/CA_1/FOODS/FOODS_1/FOODS_1_001"),
+    # so ours must not be passed in. Sparse S keeps memory flat for ~12k series.
     Y_df, S_df, tags = aggregate(
-        df=df[["unique_id", "ds", "y", "state_id", "store_id", "cat_id", "dept_id", "item_id"]],
+        df=df[["ds", "y", "state_id", "store_id", "cat_id", "dept_id", "item_id"]],
         spec=hierarchy_spec,
+        sparse_s=True,
     )
     return Y_df, S_df, tags
+
+
+def bottom_id(item_id: pd.Series, store_id: pd.Series) -> pd.Series:
+    """Bottom-level unique_id in the format produced by `aggregate`."""
+    dept_id = item_id.str.rsplit("_", n=1).str[0]
+    cat_id = item_id.str.split("_").str[0]
+    state_id = store_id.str.split("_").str[0]
+    return state_id + "/" + store_id + "/" + cat_id + "/" + dept_id + "/" + item_id
 
 
 def load_lgbm_forecasts() -> pd.DataFrame | None:
@@ -95,7 +105,7 @@ def load_lgbm_forecasts() -> pd.DataFrame | None:
     if path.exists():
         df = pd.read_parquet(path)
         df = df.rename(columns={"sale_date": "ds", "forecast": "LightGBM"})
-        df["unique_id"] = df["item_id"] + "_" + df["store_id"]
+        df["unique_id"] = bottom_id(df["item_id"], df["store_id"])
         df["ds"] = pd.to_datetime(df["ds"])
         return df[["unique_id", "ds", "LightGBM"]]
     return None
@@ -120,7 +130,8 @@ def prepare_base_forecasts(
     train = Y_df[Y_df["ds"] <= cutoff].copy()
 
     # Seasonal naive for all series (upper levels and fallback)
-    sf = StatsForecast(models=[SeasonalNaive(season_length=7)], freq="D", n_jobs=-1)
+    # n_jobs=1: on Windows each worker re-imports this module; SeasonalNaive is cheap anyway.
+    sf = StatsForecast(models=[SeasonalNaive(season_length=7)], freq="D", n_jobs=1)
     sf.fit(train[["unique_id", "ds", "y"]])
     sn_forecasts = sf.predict(h=horizon)
     sn_forecasts = sn_forecasts.rename(columns={"SeasonalNaive": "SeasonalNaive"})
@@ -148,10 +159,12 @@ def reconcile_forecasts(
     tags: dict,
 ) -> pd.DataFrame:
     """Apply Bottom-Up, Top-Down, and MinTrace reconciliation."""
+    # wls_struct needs no in-sample residuals (mint_shrink would) and
+    # scales to ~12k series with a sparse S.
     reconcilers = [
-        BottomUp(),
-        TopDown(method="forecast_proportions"),
-        MinTrace(method="mint_shrink"),
+        BottomUpSparse(),
+        TopDownSparse(method="forecast_proportions"),
+        MinTraceSparse(method="wls_struct"),
     ]
 
     hrec = HierarchicalReconciliation(reconcilers=reconcilers)
@@ -161,7 +174,7 @@ def reconcile_forecasts(
     reconciled = hrec.reconcile(
         Y_hat_df=Y_hat_df,
         Y_df=Y_df,
-        S=S_df,
+        S_df=S_df,
         tags=tags,
     )
     console.print(f"  Done in {time.time()-t0:.1f}s")
@@ -278,8 +291,9 @@ def main(
         json.dump({k: list(v) for k, v in tags.items()}, f, indent=2)
     console.print(f"Hierarchy tags saved → [cyan]{tags_out}[/cyan]")
 
-    S_df.to_parquet(REPORTS / "summing_matrix.parquet")
-    console.print(f"Summing matrix saved → [cyan]{REPORTS / 'summing_matrix.parquet'}[/cyan]")
+    s_out = REPORTS / "summing_matrix.npz"
+    save_npz(s_out, S_df.to_csr())
+    console.print(f"Summing matrix saved → [cyan]{s_out}[/cyan]")
 
     console.print(
         f"\n[bold {'green' if coherent else 'red'}]"

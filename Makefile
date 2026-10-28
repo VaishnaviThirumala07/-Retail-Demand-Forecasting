@@ -1,6 +1,6 @@
 # DS31 — Retail Demand Forecasting with Hierarchical Time Series
 
-.PHONY: all setup ingest dbt-run features baselines train reconcile evaluate app clean test help
+.PHONY: all setup sample-data ingest dbt-run features baselines train reconcile evaluate app clean test help
 
 PYTHON := python
 STREAMLIT := streamlit
@@ -10,6 +10,7 @@ help:
 	@echo "DS31 Retail Demand Forecasting — Available targets:"
 	@echo ""
 	@echo "  make setup      Install dependencies"
+	@echo "  make sample-data Generate small synthetic M5 CSVs (used by CI)"
 	@echo "  make ingest     Load M5 CSVs into DuckDB warehouse"
 	@echo "  make dbt-run    Build dbt staging + mart models with tests"
 	@echo "  make features   Engineer lag/rolling/price features"
@@ -26,6 +27,9 @@ help:
 setup:
 	pip install -r requirements.txt
 	$(DBT) deps --project-dir dbt_m5
+
+sample-data:
+	$(PYTHON) scripts/make_sample_data.py
 
 ingest:
 	$(PYTHON) src/ingest.py

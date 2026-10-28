@@ -63,11 +63,23 @@ LGBM_PARAMS = {
 app = typer.Typer()
 
 
-def load_features() -> pd.DataFrame:
-    """Load feature parquet with label-encoded categoricals."""
+def load_features(history_days: int) -> pd.DataFrame:
+    """Load the last `history_days` of features with label-encoded categoricals."""
     console.print(f"Loading features from [cyan]{FEATURES_PARQUET}[/cyan]…")
-    df = pd.read_parquet(FEATURES_PARQUET)
-    console.print(f"  {len(df):,} rows, {df.shape[1]} columns")
+    numeric_cols = [c for c in FEATURE_COLS if not c.endswith("_enc")]
+    cols = ", ".join(
+        ["series_key", "sale_date", "CAST(units AS FLOAT) AS units", *CAT_COLS]
+        + [f"CAST({c} AS FLOAT) AS {c}" for c in numeric_cols]
+    )
+    src = f"read_parquet('{FEATURES_PARQUET.as_posix()}')"
+    df = duckdb.sql(
+        f"""
+        SELECT {cols} FROM {src}
+        WHERE sale_date > (SELECT MAX(sale_date) FROM {src}) - INTERVAL '{history_days} days'
+        """
+    ).df()
+    df["sale_date"] = pd.to_datetime(df["sale_date"])
+    console.print(f"  {len(df):,} rows (last {history_days} days), {df.shape[1]} columns")
 
     # Label encode categoricals
     encoders = {}
@@ -108,11 +120,13 @@ def train_model(
 
     # Use last fold for early stopping
     train_df, val_df = folds[-1]
+    folds.clear()
 
-    X_train = train_df[FEATURE_COLS].values
-    y_train = train_df["units"].values
-    X_val = val_df[FEATURE_COLS].values
-    y_val = val_df["units"].values
+    X_train = train_df[FEATURE_COLS].to_numpy(dtype=np.float32)
+    y_train = train_df["units"].to_numpy(dtype=np.float32)
+    X_val = val_df[FEATURE_COLS].to_numpy(dtype=np.float32)
+    y_val = val_df["units"].to_numpy(dtype=np.float32)
+    del train_df
 
     dtrain = lgb.Dataset(X_train, label=y_train, feature_name=FEATURE_COLS)
     dval = lgb.Dataset(X_val, label=y_val, reference=dtrain, feature_name=FEATURE_COLS)
@@ -216,16 +230,15 @@ def log_to_mlflow(params: dict, metrics: dict, model: lgb.Booster) -> None:
 def main(
     state: str = typer.Option("CA", help="State scope"),
     no_mlflow: bool = typer.Option(False, help="Skip MLflow logging"),
+    history_days: int = typer.Option(365, help="Days of history to train on (limits memory)"),
 ) -> None:
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     REPORTS.mkdir(parents=True, exist_ok=True)
 
-    df, encoders = load_features()
+    df, encoders = load_features(history_days)
 
-    folds = time_based_split(df, n_folds=2)
-    console.print(f"  {len(folds)} rolling-origin CV folds")
-
-    model, val_scores = train_model(df, LGBM_PARAMS, folds)
+    # Only the final fold is used (early stopping); building more just copies data.
+    model, val_scores = train_model(df, LGBM_PARAMS, time_based_split(df, n_folds=1))
 
     # Feature importance
     imp = pd.DataFrame({

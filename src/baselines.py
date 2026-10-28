@@ -99,7 +99,7 @@ def run_baselines(train: pd.DataFrame, horizon: int = HORIZON) -> pd.DataFrame:
     sf = StatsForecast(
         models=models,
         freq=FREQ,
-        n_jobs=-1,
+        n_jobs=1,
         verbose=False,
     )
 
