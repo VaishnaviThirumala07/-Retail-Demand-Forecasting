@@ -2,12 +2,16 @@
 data/raw/
 data/features/
 data/forecasts/
+data/tmp/
+data/duckdb_tmp/
 warehouse/
+logs/
 
 # ML model artifacts (trained models, not dbt model SQL files)
 models/*.pkl
 models/*.joblib
 models/*.lgb
+models/*.txt
 
 # Python
 __pycache__/
@@ -40,3 +44,6 @@ Thumbs.db
 
 # Reports (keep structure, not figures)
 reports/figures/
+reports/*.csv
+reports/*.json
+reports/*.npz

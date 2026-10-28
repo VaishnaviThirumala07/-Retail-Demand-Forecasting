@@ -193,8 +193,16 @@ def main(
 
     console.print("[bold cyan]DS31 — Phase 8: Evaluation[/bold cyan]\n")
 
-    con = duckdb.connect(str(warehouse), read_only=True)
+    con = duckdb.connect(str(warehouse), read_only=True, config={"memory_limit": "3GB"})
     state_filter = f"AND state_id = '{state}'" if state else ""
+
+    levels = {
+        "total":    None,
+        "state":    "state_id",
+        "store":    "store_id",
+        "category": "cat_id",
+        "dept":     "dept_id",
+    }
 
     # Load actuals (test period = last 28 days)
     actuals_df = con.execute(
@@ -211,36 +219,27 @@ def main(
     ).df()
     actuals_df["ds"] = pd.to_datetime(actuals_df["ds"])
 
-    # Load train data (for RMSSE denominator)
-    train_df = con.execute(
-        f"""
-        SELECT
-            item_id || '_' || store_id AS series_key,
-            state_id, store_id, cat_id, dept_id, item_id,
-            sale_date AS ds,
-            CAST(units AS DOUBLE) AS y
-        FROM raw_sales_enriched
-        WHERE sale_date <= (SELECT MAX(sale_date) - INTERVAL '28 days' FROM raw_sales_enriched)
-        {state_filter}
-        """
-    ).df()
-    train_df["ds"] = pd.to_datetime(train_df["ds"])
+    # Train history per level (RMSSE denominator), aggregated in DuckDB:
+    # pulling the ~23M raw training rows into pandas exhausts a 16 GB laptop.
+    train_aggs = {}
+    for level_col in levels.values():
+        group = f"{level_col}, " if level_col else ""
+        agg = con.execute(
+            f"""
+            SELECT {group}sale_date AS ds, CAST(SUM(units) AS DOUBLE) AS y
+            FROM raw_sales_enriched
+            WHERE sale_date <= (SELECT MAX(sale_date) - INTERVAL '28 days' FROM raw_sales_enriched)
+            {state_filter}
+            GROUP BY ALL
+            ORDER BY ALL
+            """
+        ).df()
+        agg["ds"] = pd.to_datetime(agg["ds"])
+        train_aggs[level_col] = agg
     con.close()
 
-    # Load forecasts
     recon_path = FORECASTS_DIR / "reconciled_forecasts.parquet"
-    lgbm_path = FORECASTS_DIR / "lgbm_forecasts.parquet"
-
     all_results = {}
-
-    # Evaluate per level x method
-    levels = {
-        "total":    None,
-        "state":    "state_id",
-        "store":    "store_id",
-        "category": "cat_id",
-        "dept":     "dept_id",
-    }
 
     if recon_path.exists():
         recon = bottom_level(pd.read_parquet(recon_path))
@@ -253,7 +252,7 @@ def main(
                     # Total: sum everything
                     y_true = actuals_df.groupby("ds")["y"].sum()
                     y_pred_df = recon.groupby("ds")[method].sum()
-                    y_train = train_df.groupby("ds")["y"].sum()
+                    y_train = train_aggs[None]["y"]
                     r = rmsse(y_train.values, y_true.values, y_pred_df.values)
                     all_results[method][level_name] = {
                         "mean_rmsse": r, "n_series": 1
@@ -263,7 +262,7 @@ def main(
                         recon.merge(actuals_df[["series_key", level_col]].drop_duplicates(),
                                     left_on="unique_id", right_on="series_key", how="left"),
                         actuals_df.rename(columns={"series_key": "unique_id"}),
-                        train_df.rename(columns={"series_key": "unique_id"}),
+                        train_aggs[level_col],
                         level_col,
                         method,
                     )

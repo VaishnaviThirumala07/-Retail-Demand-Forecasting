@@ -72,12 +72,15 @@ def load_features(history_days: int) -> pd.DataFrame:
         + [f"CAST({c} AS FLOAT) AS {c}" for c in numeric_cols]
     )
     src = f"read_parquet('{FEATURES_PARQUET.as_posix()}')"
-    df = duckdb.sql(
+    # DuckDB defaults to 80% of RAM and one buffer per core; cap it for laptops.
+    con = duckdb.connect(config={"memory_limit": "1GB", "threads": 2})
+    df = con.execute(
         f"""
         SELECT {cols} FROM {src}
         WHERE sale_date > (SELECT MAX(sale_date) FROM {src}) - INTERVAL '{history_days} days'
         """
     ).df()
+    con.close()
     df["sale_date"] = pd.to_datetime(df["sale_date"])
     console.print(f"  {len(df):,} rows (last {history_days} days), {df.shape[1]} columns")
 
@@ -163,42 +166,17 @@ def train_model(
     return model, val_scores
 
 
-def generate_forecasts(
-    model: lgb.Booster,
-    df: pd.DataFrame,
-    horizon: int = HORIZON,
-) -> pd.DataFrame:
+def generate_forecasts(model: lgb.Booster, test: pd.DataFrame) -> pd.DataFrame:
     """
-    Direct 28-day forecast:
-    Since all lags ≥ 28, we predict all horizon steps simultaneously
-    using features as of the last available date.
+    Direct forecast of the held-out test window. Every lag/rolling feature is
+    at least 28 days old, so each test row's features were already known at
+    the forecast origin (the day before the window starts).
     """
-    console.print(f"\nGenerating {horizon}-day forecasts…")
-
-    # Get the most recent lag feature row for each series
-    last_date = df["sale_date"].max()
-    latest = df[df["sale_date"] == last_date].copy()
-
-    preds_list = []
-    for h in range(1, horizon + 1):
-        row = latest.copy()
-        # Adjust calendar features for forecast date
-        forecast_date = last_date + pd.Timedelta(days=h)
-        row["sale_date"] = forecast_date
-        row["wday"] = forecast_date.weekday()
-        row["month"] = forecast_date.month
-        row["year"] = forecast_date.year
-        row["week_of_year"] = forecast_date.isocalendar()[1]
-        # Note: snap_flag and event flags would be joined from calendar in production
-
-        X = row[FEATURE_COLS].values
-        row["forecast"] = model.predict(X)
-        row["horizon_day"] = h
-        preds_list.append(row[["series_key", "item_id", "store_id", "state_id",
-                                "sale_date", "forecast", "horizon_day"]])
-
-    forecasts = pd.concat(preds_list, ignore_index=True)
-    forecasts["forecast"] = forecasts["forecast"].clip(lower=0)
+    console.print(f"\nForecasting held-out test window ({test['sale_date'].nunique()} days)…")
+    forecasts = test[["series_key", "item_id", "store_id", "state_id", "sale_date"]].copy()
+    preds = model.predict(test[FEATURE_COLS].to_numpy(dtype=np.float32))
+    forecasts["forecast"] = np.clip(preds, 0, None)
+    forecasts["horizon_day"] = (forecasts["sale_date"] - forecasts["sale_date"].min()).dt.days + 1
     console.print(f"  {len(forecasts):,} forecast rows")
     return forecasts
 
@@ -237,8 +215,16 @@ def main(
 
     df, encoders = load_features(history_days)
 
+    # Hold out the last HORIZON days: these are what metrics/inventory_sim score.
+    test_start = df["sale_date"].max() - pd.Timedelta(days=HORIZON - 1)
+    is_test = df["sale_date"] >= test_start
+    test = df[is_test].copy()
+    df = df[~is_test]
+    console.print(f"  Held out {len(test):,} test rows from {test_start.date()}")
+
     # Only the final fold is used (early stopping); building more just copies data.
     model, val_scores = train_model(df, LGBM_PARAMS, time_based_split(df, n_folds=1))
+    del df
 
     # Feature importance
     imp = pd.DataFrame({
@@ -256,7 +242,7 @@ def main(
     imp.to_csv(REPORTS / "feature_importance.csv", index=False)
 
     # Generate forecasts
-    forecasts = generate_forecasts(model, df)
+    forecasts = generate_forecasts(model, test)
     out = ROOT / "data" / "forecasts" / "lgbm_forecasts.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
     forecasts.to_parquet(out, index=False)

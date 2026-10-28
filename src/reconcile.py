@@ -28,6 +28,9 @@ FORECASTS_DIR = ROOT / "data" / "forecasts"
 REPORTS = ROOT / "reports"
 
 HORIZON = 28
+# SeasonalNaive only needs the last week before the cutoff; loading all ~1,941
+# days for ~12k series (23M+ rows) exhausts RAM on a 16 GB laptop.
+HISTORY_DAYS = HORIZON + 56
 
 app = typer.Typer()
 
@@ -52,12 +55,11 @@ def build_hierarchy_spec() -> list[list[str]]:
 
 
 def load_bottom_series(con: duckdb.DuckDBPyConnection, scope_state: str) -> pd.DataFrame:
-    """Load bottom-level (item × store) daily sales."""
+    """Load the last HISTORY_DAYS of bottom-level (item × store) daily sales."""
     state_filter = f"AND state_id = '{scope_state}'" if scope_state else ""
     df = con.execute(
         f"""
         SELECT
-            item_id || '_' || store_id AS unique_id,
             state_id,
             store_id,
             cat_id,
@@ -66,9 +68,11 @@ def load_bottom_series(con: duckdb.DuckDBPyConnection, scope_state: str) -> pd.D
             sale_date AS ds,
             CAST(SUM(units) AS DOUBLE) AS y
         FROM raw_sales_enriched
-        WHERE 1=1 {state_filter}
-        GROUP BY unique_id, state_id, store_id, cat_id, dept_id, item_id, ds
-        ORDER BY unique_id, ds
+        WHERE sale_date > (SELECT MAX(sale_date) FROM raw_sales_enriched)
+                          - INTERVAL '{HISTORY_DAYS} days'
+          {state_filter}
+        GROUP BY state_id, store_id, cat_id, dept_id, item_id, ds
+        ORDER BY store_id, item_id, ds
         """
     ).df()
     df["ds"] = pd.to_datetime(df["ds"])
@@ -243,14 +247,14 @@ def main(
 
     console.print("[bold cyan]DS31 — Phase 7: Hierarchical Reconciliation[/bold cyan]\n")
 
-    con = duckdb.connect(str(warehouse), read_only=True)
+    con = duckdb.connect(str(warehouse), read_only=True, config={"memory_limit": "3GB"})
 
     # Load bottom series and build summing matrix
     console.print(f"Loading bottom-level series (state={state})…")
     df = load_bottom_series(con, scope_state=state)
     con.close()
 
-    n_series = df["unique_id"].nunique()
+    n_series = len(df[["store_id", "item_id"]].drop_duplicates())
     console.print(f"  {n_series:,} bottom series, {len(df):,} rows")
 
     console.print("\nBuilding summing matrix S…")
